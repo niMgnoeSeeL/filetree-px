@@ -1,0 +1,6 @@
+{
+  "name": "filetree-no-vscode",
+  "version": "0.1.0",
+  "description": "Keeps the filetree mod from loading in VS Code, in the extension and in its integrated terminal.",
+  "license": "MIT"
+}
