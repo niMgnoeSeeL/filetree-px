@@ -689,6 +689,25 @@ test('desktop: a long tree draws every row and leaves the wheel to the app', { t
   await ui.unmount()
 })
 
+test('desktop: past a few lit rows the names stop running their own shimmer clock so the page is not flooded', { timeoutMs: 20_000 }, async ($, on) => {
+  const root = '/Users/k/lit'
+  const names = Array.from({ length: 12 }, (_, i): [string, 'file'] => [`f${String(i).padStart(2, '0')}.txt`, 'file'])
+  const clock = world(on, { os: 'darwin', env: { HOME: '/Users/k', TMPDIR: '/var/folders/x/T/' }, cwd: root, top: '', dirs: { [root]: names }, status: '', numstat: '' }, [])
+  await $.session.start({ cwd: root, surface: 'desktop', isInteractive: true })
+  await clock.settle()
+  const ui = await $.ui.mount({ plugin: 'filetree', surface: 'desktop', component: 'Pane', requestId: 'filetree', props: paneProps(60) })
+  await clock.settle()
+  const litClients = async () => every(await ui.drawn(), n => has(n, 'type') && n.type === 'Client' && keyOf(n).startsWith('lit:')).length
+  for (const [name] of names.slice(0, 3)) await $.tool.call({ tool: 'Read', file_path: `${root}/${name}` })
+  await clock.settle()
+  expect(await litClients()).toBe(3)
+  for (const [name] of names.slice(3, 10)) await $.tool.call({ tool: 'Read', file_path: `${root}/${name}` })
+  await clock.settle()
+  expect(await litClients()).toBe(0)
+  expect(await texts(ui)).toContain('"children":["f09.txt"]')
+  await ui.unmount()
+})
+
 test('desktop: a very large open tree is cut with a note so the drawn tree stays within the engine bounds', { timeoutMs: 30_000 }, async ($, on) => {
   const root = '/Users/k/huge'
   const names = Array.from({ length: 5000 }, (_, i): [string, 'file'] => [`file-number-${String(i).padStart(5, '0')}.txt`, 'file'])
@@ -4215,6 +4234,125 @@ test('v marks rows: y and Y copy every mark, the marks go to Claude, V and Esc c
   await desktop.unmount()
   await ui.unmount()
 })
+
+const RANGE_WORLD = (root: string): World => ({ os: 'darwin', env: { HOME: '/home/k' }, cwd: root, top: root, status: '## main\0', numstat: '', dirs: { [root]: [['src', 'dir'], ['a.txt', 'file'], ['b.txt', 'file'], ['c.txt', 'file'], ['d.txt', 'file']], [`${root}/src`]: [['e.ts', 'file']] } })
+
+async function rangeMount($: Engine, surface: 'terminal' | 'desktop') {
+  const ui = await $.ui.mount({ plugin: 'filetree', surface, component: 'Pane', requestId: 'filetree', props: paneProps(60) })
+  const zone = (id: string) => ({ in: surface === 'desktop' ? `hit:${id}` : 'rows' })
+  const marked = async () => {
+    const tree = await ui.drawn()
+    return surface === 'desktop'
+      ? svgs(tree).filter(s => s.alt.startsWith('marked ')).map(s => s.alt.slice('marked '.length))
+      : treeRows(tree).rows.filter(r => r.left.some(s => s.t === ' ●')).map(r => r.id.split('/').pop() ?? '')
+  }
+  return { ui, zone, marked }
+}
+
+for (const surface of ['terminal', 'desktop'] as const) {
+  test(`shift+click marks every row from the last clicked or marked row to the clicked one, in tree order, on the ${surface}`, { timeoutMs: 20_000 }, async ($, on) => {
+    const root = '/home/k/proj'
+    const ran: Ran = []
+    const clock = world(on, RANGE_WORLD(root), ran)
+    await $.session.start({ cwd: root, surface, isInteractive: true })
+    await clock.settle()
+    const { ui, zone, marked } = await rangeMount($, surface)
+    await clock.settle()
+    await ui.post({ press: `${root}/d.txt` }, zone(`${root}/d.txt`))
+    await clock.advance(1000)
+    await ui.post({ press: `${root}/a.txt`, shift: true }, zone(`${root}/a.txt`))
+    await clock.settle()
+    expect(await marked()).toEqual(['a.txt', 'b.txt', 'c.txt', 'd.txt'])
+    await clock.advance(1000)
+    await ui.post({ press: `${root}/src`, shift: true }, zone(`${root}/src`))
+    await clock.settle()
+    expect(await marked()).toEqual(['src', 'a.txt', 'b.txt', 'c.txt', 'd.txt'])
+    expect(ran.some(a => a[0] === 'open')).toBe(false)
+    await ui.unmount()
+  })
+
+  test(`shift+j / shift+k and shift+down / shift+up mark the row, move and mark the next, on the ${surface}`, { timeoutMs: 20_000 }, async ($, on) => {
+    const root = '/home/k/proj'
+    const clock = world(on, RANGE_WORLD(root), [])
+    await $.session.start({ cwd: root, surface, isInteractive: true })
+    await clock.settle()
+    const { ui, zone, marked } = await rangeMount($, surface)
+    await clock.settle()
+    await ui.post({ press: `${root}/a.txt` }, zone(`${root}/a.txt`))
+    await clock.advance(1000)
+    await ui.post({ key: 'j', shift: true }, zone(`${root}/a.txt`))
+    await clock.settle()
+    expect(await marked()).toEqual(['a.txt', 'b.txt'])
+    await ui.post({ key: 'down', shift: true }, zone(`${root}/b.txt`))
+    await clock.settle()
+    expect(await marked()).toEqual(['a.txt', 'b.txt', 'c.txt'])
+    await ui.post({ key: 'k', shift: true }, zone(`${root}/c.txt`))
+    await ui.post({ key: 'up', shift: true }, zone(`${root}/b.txt`))
+    await clock.settle()
+    expect(await marked()).toEqual(['a.txt', 'b.txt', 'c.txt'])
+    await ui.post({ key: 'j' }, zone(`${root}/a.txt`))
+    await ui.post({ key: 'j' }, zone(`${root}/b.txt`))
+    await ui.post({ key: 'j' }, zone(`${root}/c.txt`))
+    await clock.settle()
+    expect(await marked()).toEqual(['a.txt', 'b.txt', 'c.txt'])
+    await ui.post({ key: 'down', shift: true }, zone(`${root}/d.txt`))
+    await clock.settle()
+    expect(await marked()).toEqual(['a.txt', 'b.txt', 'c.txt', 'd.txt'])
+    await ui.unmount()
+  })
+
+  test(`shift+click on a deleted file's ghost row ends a range instead of opening its diff, on the ${surface}`, { timeoutMs: 20_000, options: { glyphs: 'plain' } }, async ($, on) => {
+    const root = '/home/k/proj'
+    const clock = world(on, { ...RANGE_WORLD(root), status: '## main\0 D gone.ts\0', numstat: '0\t7\tgone.ts\0', patch: 'diff --git a/gone.ts b/gone.ts\ndeleted file mode 100644\n--- a/gone.ts\n+++ /dev/null\n@@ -1,1 +0,0 @@\n-const gone = 1\n' }, [])
+    await $.session.start({ cwd: root, surface, isInteractive: true })
+    await clock.settle()
+    const { ui, zone, marked } = await rangeMount($, surface)
+    await clock.settle()
+    await ui.post({ press: `${root}/b.txt` }, zone(`${root}/b.txt`))
+    await clock.advance(1000)
+    await ui.post({ press: `${root}/gone.ts`, shift: true }, zone(`${root}/gone.ts`))
+    await clock.settle()
+    expect(await marked()).toEqual(['b.txt', 'c.txt', 'd.txt', 'gone.ts'])
+    expect(await texts(ui)).not.toContain('"format":"diff"')
+    expect(await texts(ui)).not.toContain('@@ -1,1 +0,0 @@')
+    await ui.unmount()
+  })
+
+  test(`with auto-collapse on, a shift+click range ending in a folder Claude opened keeps that folder open, on the ${surface}`, { timeoutMs: 20_000, options: { collapse: 'on' } }, async ($, on) => {
+    const root = '/home/k/proj'
+    const clock = world(on, RANGE_WORLD(root), [])
+    await $.session.start({ cwd: root, surface, isInteractive: true })
+    await clock.settle()
+    const { ui, zone, marked } = await rangeMount($, surface)
+    await clock.settle()
+    await $.tool.call({ tool: 'Read', file_path: `${root}/src/e.ts` })
+    await clock.settle()
+    await clock.advance(3_000)
+    await clock.settle()
+    await ui.post({ press: `${root}/src/e.ts`, shift: true }, zone(`${root}/src/e.ts`))
+    await clock.settle()
+    expect(await marked()).toEqual(['e.ts'])
+    await clock.advance(11_000)
+    await clock.settle()
+    expect(await marked()).toEqual(['e.ts'])
+    await ui.unmount()
+  })
+
+  test(`ctrl+click opens the file and marks nothing, on the ${surface}`, { timeoutMs: 20_000 }, async ($, on) => {
+    const root = '/home/k/proj'
+    const ran: Ran = []
+    const clock = world(on, RANGE_WORLD(root), ran)
+    await $.session.start({ cwd: root, surface, isInteractive: true })
+    await clock.settle()
+    const { ui, zone, marked } = await rangeMount($, surface)
+    await clock.settle()
+    await ui.post({ press: `${root}/b.txt`, ctrl: true }, zone(`${root}/b.txt`))
+    await clock.settle()
+    expect(ran).toContainEqual(['open', '--', `${root}/b.txt`])
+    expect(await marked()).toEqual([])
+    await ui.unmount()
+  })
+}
 
 for (const surface of ['terminal', 'desktop'] as const) {
   test(`u copies the bare file name on the ${surface}`, { timeoutMs: 20_000 }, async ($, on) => {
